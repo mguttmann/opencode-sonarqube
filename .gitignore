@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+bun.lockb
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+
+# SonarQube
+.scannerwork/
+.sonar/
+
+# Misc
+*.tgz
+.cache/
+
+# SonarQube plugin state (contains tokens)
+.sonarqube/
