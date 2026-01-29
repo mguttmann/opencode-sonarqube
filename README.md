@@ -212,7 +212,7 @@ Create `.sonarqube/config.json` in your project root:
 }
 ```
 
-## Tool Actions (15 total)
+## Tool Actions (16 total)
 
 The plugin adds a `sonarqube` tool with these actions:
 
@@ -462,6 +462,152 @@ This will:
 
 **Note:** The `.sonarqube/` directory contains sensitive tokens - never commit it!
 
+## Troubleshooting
+
+### Common Issues
+
+#### "Cannot connect to SonarQube server"
+
+**Symptoms:** Plugin shows connection errors, health check fails.
+
+**Solutions:**
+1. **Check URL format**: Must include protocol (`https://` or `http://`)
+   ```bash
+   # Wrong
+   export SONAR_HOST_URL="sonarqube.example.com"
+   # Correct
+   export SONAR_HOST_URL="https://sonarqube.example.com"
+   ```
+
+2. **Verify server is running**:
+   ```bash
+   curl -s "$SONAR_HOST_URL/api/system/status" | jq .status
+   # Should output: "UP"
+   ```
+
+3. **Check firewall/VPN**: Ensure your machine can reach the server.
+
+4. **Verify credentials**:
+   ```bash
+   curl -u "$SONAR_USER:$SONAR_PASSWORD" "$SONAR_HOST_URL/api/authentication/validate"
+   # Should output: {"valid":true}
+   ```
+
+#### "Authentication failed" / 401 Errors
+
+**Solutions:**
+1. **Reload environment variables**:
+   ```bash
+   source ~/.zshrc  # or ~/.bashrc
+   ```
+
+2. **Check credentials are set**:
+   ```bash
+   echo $SONAR_HOST_URL  # Should show your URL
+   echo $SONAR_USER      # Should show username
+   ```
+
+3. **Verify password has no special characters** that need escaping:
+   ```bash
+   # If password contains special chars, quote it:
+   export SONAR_PASSWORD='my$pecial!pass'
+   ```
+
+#### "Project not found" after setup
+
+**Solutions:**
+1. **Re-run setup with force**:
+   ```typescript
+   sonarqube({ action: "setup", force: true })
+   ```
+
+2. **Check if project exists on server**: Visit `$SONAR_HOST_URL/projects` in browser.
+
+3. **Delete local state and re-initialize**:
+   ```bash
+   rm -rf .sonarqube/
+   # Then in OpenCode: sonarqube({ action: "setup" })
+   ```
+
+#### Plugin doesn't load / "Plugin not found"
+
+**Solutions:**
+1. **Verify installation**:
+   ```bash
+   cat package.json | grep opencode-sonarqube
+   # Should show: "opencode-sonarqube": "..."
+   ```
+
+2. **Check opencode.json**:
+   ```json
+   {
+     "plugin": ["opencode-sonarqube"]
+   }
+   ```
+
+3. **Reinstall**:
+   ```bash
+   bun remove opencode-sonarqube && bun add opencode-sonarqube
+   ```
+
+4. **Restart OpenCode** after installation.
+
+#### Analysis shows no issues but Quality Gate fails
+
+This usually means **security hotspots** need review.
+
+**Solution:**
+```typescript
+// List hotspots
+sonarqube({ action: "hotspots" })
+
+// Bulk-review as safe (if appropriate)
+sonarqube({ action: "reviewhotspot", resolution: "SAFE" })
+```
+
+#### Slow analysis / Timeout errors
+
+**Solutions:**
+1. **Exclude unnecessary files** in `.sonarqube/config.json`:
+   ```json
+   {
+     "exclusions": "**/node_modules/**,**/dist/**,**/*.min.js"
+   }
+   ```
+
+2. **Increase timeout** (set environment variable):
+   ```bash
+   export SONARQUBE_TIMEOUT=120000  # 2 minutes
+   ```
+
+3. **Check server resources**: Analysis is CPU-intensive on the server side.
+
+### Debug Mode
+
+Enable detailed logging:
+```bash
+export SONARQUBE_DEBUG=true
+```
+
+Logs are written to: `/tmp/sonarqube-plugin-debug.log`
+
+View logs in real-time:
+```bash
+tail -f /tmp/sonarqube-plugin-debug.log
+```
+
+### Getting Help
+
+1. **Check existing issues**: [GitHub Issues](https://github.com/mguttmann/opencode-sonarqube/issues)
+2. **Open new issue** with:
+   - OpenCode version
+   - Plugin version (`bun list opencode-sonarqube`)
+   - SonarQube server version
+   - Error message/logs
+   - Steps to reproduce
+
+---
+
 ## FAQ
 
 ### Where is the configuration stored?
@@ -505,7 +651,79 @@ sonarqube({ action: "analyze" })
 
 ### How do I use this with multiple SonarQube servers?
 
-Currently, the plugin uses global environment variables. For different servers per project, you'd need to set the environment variables differently per terminal session.
+Currently, the plugin uses global environment variables. For different servers per project:
+
+**Option 1: Use direnv (recommended)**
+```bash
+# Install direnv
+brew install direnv  # macOS
+
+# In project directory, create .envrc
+echo 'export SONAR_HOST_URL="https://server1.example.com"' > .envrc
+echo 'export SONAR_USER="admin"' >> .envrc
+echo 'export SONAR_PASSWORD="password1"' >> .envrc
+direnv allow
+```
+
+**Option 2: Use project-specific shell scripts**
+```bash
+# Create project setup script
+cat > .sonarqube-env.sh << 'EOF'
+export SONAR_HOST_URL="https://server1.example.com"
+export SONAR_USER="admin"
+export SONAR_PASSWORD="password1"
+EOF
+
+# Source before starting OpenCode
+source .sonarqube-env.sh && opencode
+```
+
+**Option 3: Different terminal profiles**
+Create shell profiles for each server and switch between them.
+
+### What happens if SonarQube server is offline?
+
+The plugin handles offline scenarios gracefully:
+
+1. **During startup**: System prompt injection is skipped, no errors shown
+2. **During analysis**: Error message explains the connection issue
+3. **Cached data**: Last analysis results are preserved locally in `.sonarqube/project.json`
+4. **Auto-retry**: The plugin automatically retries failed requests up to 3 times with exponential backoff
+
+You can continue coding - the plugin will reconnect when the server is available again.
+
+### How do I reset everything and start fresh?
+
+```bash
+# Remove local plugin state
+rm -rf .sonarqube/
+
+# Remove from package.json (optional)
+bun remove opencode-sonarqube
+
+# Reinstall
+bun add opencode-sonarqube
+
+# Restart OpenCode and run setup
+# In OpenCode: sonarqube({ action: "setup" })
+```
+
+### Can I use a token instead of username/password?
+
+Yes! SonarQube tokens are recommended for better security:
+
+1. **Generate token** in SonarQube: User > My Account > Security > Generate Token
+2. **Use as password** (leave user as your username):
+   ```bash
+   export SONAR_USER="your-username"
+   export SONAR_PASSWORD="sqp_your_token_here"
+   ```
+
+Or use token directly (user becomes empty):
+```bash
+export SONAR_USER=""
+export SONAR_PASSWORD="sqp_your_token_here"
+```
 
 ### Can I use this without OpenCode?
 

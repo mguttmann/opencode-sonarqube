@@ -5,7 +5,7 @@
  * @module opencode-sonarqube
  * @author Manuel Guttmann
  * @license MIT
- * @version 1.2.3
+ * @version 2.2.0
  */
 
 import type { Plugin, Hooks, ToolContext } from "@opencode-ai/plugin";

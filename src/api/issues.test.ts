@@ -4,7 +4,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { IssuesAPI } from "./issues.ts";
-import { SonarQubeClient } from "./client.ts";
+import { createTestClient } from "./test-utils.ts";
 import type { SonarQubeIssue, IssuesSearchResponse } from "../types/index.ts";
 
 // Mock fetch globally
@@ -12,7 +12,6 @@ const originalFetch = globalThis.fetch;
 
 describe("IssuesAPI", () => {
   let mockFetch: ReturnType<typeof mock>;
-  let client: SonarQubeClient;
   let api: IssuesAPI;
 
   beforeEach(() => {
@@ -25,11 +24,7 @@ describe("IssuesAPI", () => {
       )
     );
     globalThis.fetch = mockFetch as unknown as typeof fetch;
-    client = new SonarQubeClient({
-      url: "https://sonar.example.com",
-      auth: { token: "test-token" },
-    });
-    api = new IssuesAPI(client);
+    api = new IssuesAPI(createTestClient());
   });
 
   afterEach(() => {

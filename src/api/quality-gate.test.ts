@@ -4,7 +4,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { QualityGateAPI, METRIC_KEYS } from "./quality-gate.ts";
-import { SonarQubeClient } from "./client.ts";
+import { createTestClient } from "./test-utils.ts";
 import type { EnterpriseValidationResult } from "../types/index.ts";
 
 // Mock fetch globally
@@ -12,7 +12,6 @@ const originalFetch = globalThis.fetch;
 
 describe("QualityGateAPI", () => {
   let mockFetch: ReturnType<typeof mock>;
-  let client: SonarQubeClient;
   let api: QualityGateAPI;
 
   beforeEach(() => {
@@ -25,11 +24,7 @@ describe("QualityGateAPI", () => {
       )
     );
     globalThis.fetch = mockFetch as unknown as typeof fetch;
-    client = new SonarQubeClient({
-      url: "https://sonar.example.com",
-      auth: { token: "test-token" },
-    });
-    api = new QualityGateAPI(client);
+    api = new QualityGateAPI(createTestClient());
   });
 
   afterEach(() => {

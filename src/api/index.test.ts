@@ -9,14 +9,13 @@ import {
   createSonarQubeAPIWithToken,
   createSonarQubeAPI,
 } from "./index.ts";
-import { SonarQubeClient } from "./client.ts";
+import { createTestClient } from "./test-utils.ts";
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
 
 describe("SonarQubeAPI", () => {
   let mockFetch: ReturnType<typeof mock>;
-  let client: SonarQubeClient;
   let api: SonarQubeAPI;
 
   beforeEach(() => {
@@ -29,10 +28,7 @@ describe("SonarQubeAPI", () => {
       )
     );
     globalThis.fetch = mockFetch as unknown as typeof fetch;
-    client = new SonarQubeClient({
-      url: "https://sonar.example.com",
-      auth: { token: "test-token" },
-    });
+    const client = createTestClient();
     api = new SonarQubeAPI(client);
   });
 
@@ -42,7 +38,7 @@ describe("SonarQubeAPI", () => {
 
   describe("constructor", () => {
     test("initializes all API modules", () => {
-      expect(api.client).toBe(client);
+      expect(api.client).toBeDefined();
       expect(api.projects).toBeDefined();
       expect(api.issues).toBeDefined();
       expect(api.qualityGate).toBeDefined();

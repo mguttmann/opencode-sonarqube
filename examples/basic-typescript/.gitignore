@@ -1,0 +1,18 @@
+# Dependencies
+node_modules/
+bun.lockb
+
+# Build output
+dist/
+
+# SonarQube local state (contains tokens - never commit!)
+.sonarqube/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Environment
+.env
+.env.local

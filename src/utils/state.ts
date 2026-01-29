@@ -1,6 +1,7 @@
 /**
  * Project State Manager
  * Manages local project state stored in .sonarqube/project.json
+ * Includes versioning, migration, and auto-repair capabilities
  */
 
 import { type ProjectState, ProjectStateSchema } from "../types/index.ts";
@@ -10,6 +11,19 @@ import { createNoopLogger } from "./logger.ts";
 const logger = createNoopLogger();
 const STATE_DIR = ".sonarqube";
 const STATE_FILE = "project.json";
+const BACKUP_FILE = "project.json.backup";
+
+/**
+ * Current state schema version - increment when schema changes
+ */
+export const STATE_VERSION = 2;
+
+/**
+ * Extended state with version for migration
+ */
+interface VersionedState extends ProjectState {
+  _version?: number;
+}
 
 /**
  * Get the state file path for a directory
@@ -34,7 +48,7 @@ export async function hasProjectState(directory: string): Promise<boolean> {
 }
 
 /**
- * Load project state from disk
+ * Load project state from disk with auto-repair and migration
  */
 export async function loadProjectState(directory: string): Promise<ProjectState | null> {
   const statePath = getStatePath(directory);
@@ -46,9 +60,60 @@ export async function loadProjectState(directory: string): Promise<ProjectState 
 
   try {
     const content = await Bun.file(statePath).text();
-    const data = JSON.parse(content);
-    const state = ProjectStateSchema.parse(data);
-    return state;
+    
+    // Handle empty or whitespace-only content
+    if (!content.trim()) {
+      logger.warn("Empty state file detected, removing");
+      await deleteProjectState(directory);
+      return null;
+    }
+    
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(content);
+    } catch (parseError) {
+      // JSON is corrupt - log the error and try to recover from backup
+      const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
+      logger.error("Corrupt JSON in state file, attempting backup recovery", { error: errorMessage });
+      const recovered = await recoverFromBackup(directory);
+      if (recovered) {
+        return recovered;
+      }
+      // No backup available - delete corrupt file
+      await deleteProjectState(directory);
+      return null;
+    }
+    
+    // Try to validate with schema
+    const validationResult = ProjectStateSchema.safeParse(data);
+    
+    if (validationResult.success) {
+      // Valid state - migrate if needed and return
+      const state = await migrateState(data as unknown as VersionedState, directory);
+      return state;
+    }
+    
+    // Schema validation failed - try to repair
+    logger.warn("State validation failed, attempting repair", {
+      errors: validationResult.error.format(),
+    });
+    
+    const repairedState = await repairState(data, directory);
+    if (repairedState) {
+      logger.info("State successfully repaired");
+      return repairedState;
+    }
+    
+    // Could not repair - try backup
+    logger.error("State repair failed, attempting backup recovery");
+    const recovered = await recoverFromBackup(directory);
+    if (recovered) {
+      return recovered;
+    }
+    
+    // No recovery possible
+    logger.error("Failed to load project state - no recovery possible");
+    return null;
   } catch (error) {
     logger.error("Failed to load project state", { 
       error: error instanceof Error ? error.message : String(error),
@@ -59,7 +124,176 @@ export async function loadProjectState(directory: string): Promise<ProjectState 
 }
 
 /**
- * Save project state to disk
+ * Migrate state from older versions to current version
+ */
+async function migrateState(data: VersionedState, directory: string): Promise<ProjectState> {
+  const currentVersion = data._version ?? 1;
+  
+  if (currentVersion >= STATE_VERSION) {
+    // Already at current version
+    const { _version, ...state } = data;
+    return state as ProjectState;
+  }
+  
+  logger.info("Migrating state", { from: currentVersion, to: STATE_VERSION });
+  
+  let migratedData = { ...data };
+  
+  // Migration v1 -> v2: Add missing optional fields with defaults
+  if (currentVersion < 2) {
+    migratedData = {
+      ...migratedData,
+      languages: migratedData.languages ?? [],
+      setupComplete: migratedData.setupComplete ?? true,
+    };
+  }
+  
+  // Add version marker
+  migratedData._version = STATE_VERSION;
+  
+  // Save migrated state (with backup)
+  const { _version, ...cleanState } = migratedData;
+  const finalState = cleanState as ProjectState;
+  
+  // Create backup before saving migrated state
+  await createBackup(directory);
+  await saveProjectState(directory, finalState);
+  
+  logger.info("State migration complete");
+  return finalState;
+}
+
+/**
+ * Extract string field from data or return default
+ */
+function extractString(data: Record<string, unknown>, key: string, defaultValue?: string): string | undefined {
+  const value = data[key];
+  return (typeof value === "string" && value.length > 0) ? value : defaultValue;
+}
+
+/**
+ * Extract boolean field from data or return default
+ */
+function extractBoolean(data: Record<string, unknown>, key: string, defaultValue: boolean): boolean {
+  const value = data[key];
+  return typeof value === "boolean" ? value : defaultValue;
+}
+
+/**
+ * Extract string array from data
+ */
+function extractStringArray(data: Record<string, unknown>, key: string): string[] {
+  const value = data[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+/**
+ * Extract required project key, deriving from directory if needed
+ */
+function extractProjectKey(data: Record<string, unknown>, directory: string): string | null {
+  const key = extractString(data, "projectKey");
+  if (key) return key;
+  
+  const dirName = directory.split("/").pop();
+  return (dirName && dirName.length > 0) ? dirName : null;
+}
+
+/**
+ * Attempt to repair a corrupted/invalid state
+ */
+async function repairState(
+  data: Record<string, unknown>,
+  directory: string
+): Promise<ProjectState | null> {
+  await createBackup(directory);
+  
+  const projectKey = extractProjectKey(data, directory);
+  const projectToken = extractString(data, "projectToken");
+  
+  // Token is essential - can't repair without it
+  if (!projectKey || !projectToken) {
+    return null;
+  }
+  
+  const repaired: Partial<ProjectState> = {
+    projectKey,
+    projectToken,
+    tokenName: extractString(data, "tokenName") ?? `opencode-${projectKey}-recovered`,
+    initializedAt: extractString(data, "initializedAt") ?? new Date().toISOString(),
+    languages: extractStringArray(data, "languages"),
+    qualityGate: extractString(data, "qualityGate"),
+    lastAnalysis: extractString(data, "lastAnalysis"),
+    setupComplete: extractBoolean(data, "setupComplete", true),
+  };
+  
+  const validationResult = ProjectStateSchema.safeParse(repaired);
+  if (!validationResult.success) {
+    logger.error("Repaired state still invalid", { errors: validationResult.error.format() });
+    return null;
+  }
+  
+  await saveProjectState(directory, validationResult.data);
+  return validationResult.data;
+}
+
+/**
+ * Create a backup of the current state file
+ */
+async function createBackup(directory: string): Promise<boolean> {
+  const statePath = getStatePath(directory);
+  const backupPath = `${directory}/${STATE_DIR}/${BACKUP_FILE}`;
+  
+  try {
+    const exists = await Bun.file(statePath).exists();
+    if (!exists) {
+      return false;
+    }
+    
+    const content = await Bun.file(statePath).text();
+    await Bun.write(backupPath, content);
+    logger.info("Created state backup");
+    return true;
+  } catch {
+    logger.warn("Failed to create state backup");
+    return false;
+  }
+}
+
+/**
+ * Attempt to recover state from backup file
+ */
+async function recoverFromBackup(directory: string): Promise<ProjectState | null> {
+  const backupPath = `${directory}/${STATE_DIR}/${BACKUP_FILE}`;
+  
+  try {
+    const exists = await Bun.file(backupPath).exists();
+    if (!exists) {
+      return null;
+    }
+    
+    const content = await Bun.file(backupPath).text();
+    if (!content.trim()) {
+      return null;
+    }
+    
+    const data = JSON.parse(content);
+    const validationResult = ProjectStateSchema.safeParse(data);
+    
+    if (!validationResult.success) {
+      return null;
+    }
+    
+    // Backup is valid - restore it
+    await saveProjectState(directory, validationResult.data);
+    logger.info("State recovered from backup");
+    return validationResult.data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save project state to disk with automatic backup
  */
 export async function saveProjectState(
   directory: string,
@@ -72,11 +306,28 @@ export async function saveProjectState(
   const { mkdir } = await import("node:fs/promises");
   await mkdir(stateDir, { recursive: true });
 
+  // Create backup of existing state before overwriting
+  const existingFile = Bun.file(statePath);
+  if (await existingFile.exists()) {
+    try {
+      const existingContent = await existingFile.text();
+      if (existingContent.trim()) {
+        const backupPath = `${stateDir}/${BACKUP_FILE}`;
+        await Bun.write(backupPath, existingContent);
+      }
+    } catch {
+      // Backup creation failed - continue anyway
+    }
+  }
+
+  // Add version to state for future migrations
+  const versionedState = { ...state, _version: STATE_VERSION };
+  
   // Write state file
-  const content = JSON.stringify(state, null, 2);
+  const content = JSON.stringify(versionedState, null, 2);
   await Bun.write(statePath, content);
   
-  logger.info("Saved project state", { projectKey: state.projectKey });
+  logger.info("Saved project state", { projectKey: state.projectKey, version: STATE_VERSION });
 }
 
 /**

@@ -1,6 +1,6 @@
 import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test";
 import { ComponentsAPI } from "./components.ts";
-import { SonarQubeClient } from "./client.ts";
+import { createTestClient } from "./test-utils.ts";
 
 describe("ComponentsAPI", () => {
   let api: ComponentsAPI;
@@ -8,11 +8,7 @@ describe("ComponentsAPI", () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
-    const client = new SonarQubeClient({
-      url: "http://localhost:9000",
-      auth: { token: "test-token" },
-    });
-    api = new ComponentsAPI(client);
+    api = new ComponentsAPI(createTestClient("http://localhost:9000"));
   });
 
   afterEach(() => {

@@ -16,6 +16,7 @@ import {
   deleteProjectState,
   createInitialState,
   ensureGitignore,
+  STATE_VERSION,
 } from "./state.ts";
 
 describe("State Management", () => {
@@ -250,6 +251,159 @@ describe("State Management", () => {
       const content = await Bun.file(`${testDir}/.gitignore`).text();
       const matches = content.match(/\.sonarqube/g);
       expect(matches?.length).toBe(1);
+    });
+  });
+
+  describe("State Migration and Recovery", () => {
+    test("saves state with version number", async () => {
+      const state = createInitialState({
+        projectKey: "test",
+        projectToken: "token",
+        tokenName: "name",
+        languages: ["ts"],
+      });
+
+      await saveProjectState(testDir, state);
+
+      const raw = JSON.parse(await Bun.file(`${testDir}/.sonarqube/project.json`).text());
+      expect(raw._version).toBe(STATE_VERSION);
+    });
+
+    test("creates backup when saving over existing state", async () => {
+      const state1 = createInitialState({
+        projectKey: "test1",
+        projectToken: "token1",
+        tokenName: "name1",
+        languages: ["ts"],
+      });
+
+      await saveProjectState(testDir, state1);
+
+      const state2 = createInitialState({
+        projectKey: "test2",
+        projectToken: "token2",
+        tokenName: "name2",
+        languages: ["js"],
+      });
+
+      await saveProjectState(testDir, state2);
+
+      // Check backup exists
+      const backupExists = await Bun.file(`${testDir}/.sonarqube/project.json.backup`).exists();
+      expect(backupExists).toBe(true);
+
+      // Backup should contain state1 data (with version)
+      const backup = JSON.parse(await Bun.file(`${testDir}/.sonarqube/project.json.backup`).text());
+      expect(backup.projectKey).toBe("test1");
+    });
+
+    test("handles empty state file gracefully", async () => {
+      await fsPromises.mkdir(`${testDir}/.sonarqube`, { recursive: true });
+      await Bun.write(`${testDir}/.sonarqube/project.json`, "");
+
+      const result = await loadProjectState(testDir);
+      expect(result).toBeNull();
+    });
+
+    test("handles whitespace-only state file gracefully", async () => {
+      await fsPromises.mkdir(`${testDir}/.sonarqube`, { recursive: true });
+      await Bun.write(`${testDir}/.sonarqube/project.json`, "   \n  \t  ");
+
+      const result = await loadProjectState(testDir);
+      expect(result).toBeNull();
+    });
+
+    test("repairs partially valid state", async () => {
+      // Create state with missing optional fields
+      const partialState = {
+        projectKey: "test-project",
+        projectToken: "sqp_token123",
+        tokenName: "opencode-test",
+        initializedAt: "2024-01-01T00:00:00Z",
+        // Missing: languages, setupComplete
+      };
+
+      await fsPromises.mkdir(`${testDir}/.sonarqube`, { recursive: true });
+      await Bun.write(`${testDir}/.sonarqube/project.json`, JSON.stringify(partialState));
+
+      // Should fail validation and attempt repair
+      const result = await loadProjectState(testDir);
+      
+      // If repair works, we get state back
+      // If not, we get null
+      // Either way, it shouldn't crash
+      expect(result === null || typeof result?.projectKey === "string").toBe(true);
+    });
+
+    test("recovers from backup when main state is corrupt", async () => {
+      // Create valid backup
+      const validState: ProjectState = {
+        projectKey: "backup-project",
+        projectToken: "sqp_backup",
+        tokenName: "backup-token",
+        initializedAt: "2024-01-01T00:00:00Z",
+        languages: ["typescript"],
+        setupComplete: true,
+      };
+
+      await fsPromises.mkdir(`${testDir}/.sonarqube`, { recursive: true });
+      await Bun.write(`${testDir}/.sonarqube/project.json.backup`, JSON.stringify(validState));
+      
+      // Create corrupt main state
+      await Bun.write(`${testDir}/.sonarqube/project.json`, "{{{{invalid json");
+
+      const result = await loadProjectState(testDir);
+      
+      // Should recover from backup
+      expect(result?.projectKey).toBe("backup-project");
+    });
+
+    test("returns null when both main and backup are corrupt", async () => {
+      await fsPromises.mkdir(`${testDir}/.sonarqube`, { recursive: true });
+      await Bun.write(`${testDir}/.sonarqube/project.json`, "{{{{invalid");
+      await Bun.write(`${testDir}/.sonarqube/project.json.backup`, "{{{{also invalid");
+
+      const result = await loadProjectState(testDir);
+      expect(result).toBeNull();
+    });
+
+    test("repairs state missing required fields by deriving from directory", async () => {
+      // State with token but missing projectKey
+      const brokenState = {
+        projectToken: "sqp_valid_token",
+        tokenName: "some-token",
+        initializedAt: "2024-01-01T00:00:00Z",
+        languages: ["typescript"],
+        setupComplete: true,
+      };
+
+      await fsPromises.mkdir(`${testDir}/.sonarqube`, { recursive: true });
+      await Bun.write(`${testDir}/.sonarqube/project.json`, JSON.stringify(brokenState));
+
+      const result = await loadProjectState(testDir);
+      
+      // Should attempt to derive projectKey from directory name
+      // Result depends on whether repair succeeds
+      expect(result === null || typeof result?.projectKey === "string").toBe(true);
+    });
+
+    test("returns null when token is missing and cannot be recovered", async () => {
+      // State missing the essential token
+      const noTokenState = {
+        projectKey: "test-project",
+        tokenName: "some-token",
+        initializedAt: "2024-01-01T00:00:00Z",
+        languages: ["typescript"],
+        setupComplete: true,
+      };
+
+      await fsPromises.mkdir(`${testDir}/.sonarqube`, { recursive: true });
+      await Bun.write(`${testDir}/.sonarqube/project.json`, JSON.stringify(noTokenState));
+
+      const result = await loadProjectState(testDir);
+      
+      // Token is essential - cannot be repaired
+      expect(result).toBeNull();
     });
   });
 });

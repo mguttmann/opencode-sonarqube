@@ -22,7 +22,21 @@ export type AuthConfig =
 export interface ClientConfig {
   url: string;
   auth: AuthConfig;
+  /** Maximum number of retries for failed requests (default: 3) */
+  maxRetries?: number;
+  /** Initial retry delay in milliseconds (default: 1000) */
+  retryDelay?: number;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
 }
+
+/** Default retry configuration */
+const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_RETRY_DELAY = 1000;
+const DEFAULT_TIMEOUT = 30000;
+
+/** HTTP status codes that should trigger a retry */
+const RETRYABLE_STATUS_CODES = new Set([408, 429, 500, 502, 503, 504]);
 
 /** Common record type for request parameters/body */
 type ParamRecord = Record<string, string | number | boolean | undefined>;
@@ -169,56 +183,187 @@ function buildAuthHeader(auth: AuthConfig): string {
 }
 
 /**
+ * Sleep for a given number of milliseconds
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Calculate exponential backoff delay with jitter
+ */
+function calculateBackoffDelay(attempt: number, baseDelay: number): number {
+  // Exponential backoff: baseDelay * 2^attempt
+  const exponentialDelay = baseDelay * Math.pow(2, attempt);
+  // Add jitter (±25%) to prevent thundering herd
+  const jitter = exponentialDelay * 0.25 * (Math.random() * 2 - 1);
+  return Math.min(exponentialDelay + jitter, 30000); // Cap at 30 seconds
+}
+
+/**
+ * Check if an error is retryable
+ */
+function isRetryableError(error: unknown, statusCode?: number): boolean {
+  // Network/connection errors are retryable
+  if (error instanceof TypeError && error.message.includes("fetch")) {
+    return true;
+  }
+  
+  // Check status code
+  if (statusCode && RETRYABLE_STATUS_CODES.has(statusCode)) {
+    return true;
+  }
+  
+  // Connection errors are retryable
+  if (error instanceof Error && "code" in error) {
+    const errorCode = (error as { code: string }).code;
+    return errorCode === "CONNECTION_ERROR";
+  }
+  
+  return false;
+}
+
+/** Result of a single fetch attempt */
+type FetchAttemptResult<T> = 
+  | { success: true; data: T }
+  | { success: false; shouldRetry: boolean; statusCode?: number; waitTime?: number; error?: unknown };
+
+/**
+ * Get retry wait time for rate limit response
+ */
+function getRateLimitWaitTime(response: Response, attempt: number, baseDelay: number): number {
+  const retryAfter = response.headers.get("Retry-After");
+  return retryAfter 
+    ? Number.parseInt(retryAfter, 10) * 1000 
+    : calculateBackoffDelay(attempt, baseDelay);
+}
+
+/**
  * SonarQube API Client
  * Supports both token-based and user/password authentication
+ * Includes automatic retry with exponential backoff for transient errors
  */
 export class SonarQubeClient {
   private readonly baseUrl: string;
   private readonly auth: AuthConfig;
+  private readonly maxRetries: number;
+  private readonly retryDelay: number;
+  private readonly timeout: number;
 
   constructor(config: ClientConfig, _logger?: Logger) {
     this.baseUrl = normalizeUrl(config.url);
     this.auth = config.auth;
-    // NOTE: No console.log here - it breaks the TUI!
+    this.maxRetries = config.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryDelay = config.retryDelay ?? DEFAULT_RETRY_DELAY;
+    this.timeout = config.timeout ?? DEFAULT_TIMEOUT;
   }
 
   /**
-   * Make an authenticated request to the SonarQube API
+   * Execute a single fetch attempt with timeout
    */
-  private async request<T>(
-    endpoint: string,
-    options: RequestOptions = {}
-  ): Promise<T> {
-    const { method = "GET", params, body } = options;
+  private async executeRequest<T>(
+    url: string,
+    method: string,
+    headers: Record<string, string>,
+    body: string | undefined,
+    attempt: number
+  ): Promise<FetchAttemptResult<T>> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    
+    try {
+      const response = await fetch(url, { method, headers, body, signal: controller.signal });
+      clearTimeout(timeoutId);
+      
+      return this.processResponse<T>(response, attempt);
+    } catch (error) {
+      clearTimeout(timeoutId);
+      return this.handleFetchException(error);
+    }
+  }
 
+  /**
+   * Process HTTP response and determine if retry is needed
+   */
+  private async processResponse<T>(response: Response, attempt: number): Promise<FetchAttemptResult<T>> {
+    if (response.ok) {
+      const text = await response.text();
+      return { success: true, data: parseResponseBody<T>(text) };
+    }
+    
+    const canRetry = attempt < this.maxRetries && RETRYABLE_STATUS_CODES.has(response.status);
+    
+    if (!canRetry) {
+      await handleResponseError(response);
+      // handleResponseError always throws, but TypeScript doesn't know that
+      throw new Error("Unreachable");
+    }
+    
+    const waitTime = response.status === 429
+      ? getRateLimitWaitTime(response, attempt, this.retryDelay)
+      : calculateBackoffDelay(attempt, this.retryDelay);
+    
+    return { success: false, shouldRetry: true, statusCode: response.status, waitTime };
+  }
+
+  /**
+   * Handle exceptions during fetch
+   */
+  private handleFetchException(error: unknown): FetchAttemptResult<never> {
+    // Timeout errors should not retry
+    if (error instanceof Error && error.name === "AbortError") {
+      return { success: false, shouldRetry: false, error };
+    }
+    
+    // Check if error is retryable
+    return { 
+      success: false, 
+      shouldRetry: isRetryableError(error), 
+      error 
+    };
+  }
+
+  /**
+   * Make an authenticated request to the SonarQube API with retry support
+   */
+  private async request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
+    const { method = "GET", params, body } = options;
     const url = buildUrl(this.baseUrl, endpoint, params);
     const requestBody = buildFormBody(body);
-
+    
     const headers: Record<string, string> = {
       Authorization: buildAuthHeader(this.auth),
       Accept: "application/json",
     };
-
     if (requestBody) {
       headers["Content-Type"] = "application/x-www-form-urlencoded";
     }
 
-    try {
-      const response = await fetch(url, {
-        method,
-        headers,
-        body: requestBody,
-      });
-
-      if (!response.ok) {
-        await handleResponseError(response);
+    let lastError: unknown;
+    
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      const result = await this.executeRequest<T>(url, method, headers, requestBody, attempt);
+      
+      if (result.success) {
+        return result.data;
       }
-
-      const text = await response.text();
-      return parseResponseBody<T>(text);
-    } catch (error) {
-      handleFetchError(error, this.baseUrl);
+      
+      lastError = result.error;
+      
+      if (result.shouldRetry && attempt < this.maxRetries) {
+        await sleep(result.waitTime ?? calculateBackoffDelay(attempt, this.retryDelay));
+        continue;
+      }
+      
+      // Handle timeout specifically
+      if (result.error instanceof Error && result.error.name === "AbortError") {
+        throw ConnectionError(`Request to ${endpoint} timed out after ${this.timeout}ms`);
+      }
+      
+      handleFetchError(result.error, this.baseUrl);
     }
+    
+    handleFetchError(lastError, this.baseUrl);
   }
 
   /**
@@ -313,15 +458,26 @@ export class SonarQubeClient {
   }
 }
 
+/** Additional options for client creation */
+export interface ClientOptions {
+  /** Maximum number of retries for failed requests (default: 3) */
+  maxRetries?: number;
+  /** Initial retry delay in milliseconds (default: 1000) */
+  retryDelay?: number;
+  /** Request timeout in milliseconds (default: 30000) */
+  timeout?: number;
+}
+
 /**
  * Create a SonarQube client with token auth
  */
 export function createClientWithToken(
   url: string,
   token: string,
-  logger?: Logger
+  logger?: Logger,
+  options?: ClientOptions
 ): SonarQubeClient {
-  return new SonarQubeClient({ url, auth: { token } }, logger);
+  return new SonarQubeClient({ url, auth: { token }, ...options }, logger);
 }
 
 /**
@@ -331,7 +487,8 @@ export function createClientWithCredentials(
   url: string,
   user: string,
   password: string,
-  logger?: Logger
+  logger?: Logger,
+  options?: ClientOptions
 ): SonarQubeClient {
-  return new SonarQubeClient({ url, auth: { user, password } }, logger);
+  return new SonarQubeClient({ url, auth: { user, password }, ...options }, logger);
 }

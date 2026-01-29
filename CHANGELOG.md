@@ -5,6 +5,50 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-01-29
+
+### Added
+
+#### Robustness Improvements
+- **State Migration System**: Automatic migration of `.sonarqube/project.json` when schema changes
+- **State Auto-Repair**: Corrupt or invalid state files are now automatically repaired when possible
+- **Automatic Backups**: State file is backed up before every save, enabling recovery from corruption
+- **Backup Recovery**: If state file is corrupt, plugin attempts to recover from backup
+
+#### Reliability
+- **Retry with Exponential Backoff**: API calls now automatically retry up to 3 times with exponential backoff
+- **Timeout Handling**: Requests timeout after 30 seconds with helpful error messages
+- **Retryable Errors**: Connection errors, rate limits (429), and server errors (5xx) trigger automatic retry
+- **Jitter in Backoff**: Prevents thundering herd problem when multiple requests fail
+
+#### Error Messages
+- **Offline Mode Messages**: Clear guidance when SonarQube server is unreachable
+- **Timeout Messages**: Specific help for timeout situations
+- **Connection Error Recovery**: Step-by-step recovery instructions for connection problems
+
+#### Developer Experience
+- **Test Utilities**: Added `createTestClient()` helper for faster, deterministic tests
+- **Configurable Retries**: Client creation functions now accept retry options
+
+### Fixed
+- **CRITICAL**: Removed self-dependency in `package.json` that could cause build issues
+- **Version Mismatch**: Synchronized version in `src/index.ts` with `package.json`
+- **README**: Fixed tool count (15 → 16 total actions)
+- **Cognitive Complexity**: Refactored 3 functions to reduce complexity below threshold (15)
+  - `SonarQubeClient.request()` - Split into smaller helper methods
+  - `executeSonarQubeTool()` - Extracted routing and error handling
+  - `repairState()` - Extracted field extraction helpers
+
+### Changed
+- State files now include `_version` field for future migrations
+- Improved error handling in tool execution with specific error type detection
+- `RETRYABLE_STATUS_CODES` changed from Array to Set for O(1) lookup
+
+### Documentation
+- **New Troubleshooting Section**: Common issues with solutions
+- **Expanded FAQ**: Multi-server setup, offline behavior, token usage, reset instructions
+- **Debug Mode Instructions**: How to enable and view debug logs
+
 ## [1.2.47] - 2026-01-26
 
 ### Changed

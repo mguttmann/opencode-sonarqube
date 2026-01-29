@@ -4,7 +4,7 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { ProjectsAPI } from "./projects.ts";
-import { SonarQubeClient } from "./client.ts";
+import { createTestClient } from "./test-utils.ts";
 // Error factory functions are no longer needed in imports since we use toMatchObject
 
 // Mock fetch globally
@@ -12,7 +12,6 @@ const originalFetch = globalThis.fetch;
 
 describe("ProjectsAPI", () => {
   let mockFetch: ReturnType<typeof mock>;
-  let client: SonarQubeClient;
   let api: ProjectsAPI;
 
   beforeEach(() => {
@@ -25,11 +24,7 @@ describe("ProjectsAPI", () => {
       )
     );
     globalThis.fetch = mockFetch as unknown as typeof fetch;
-    client = new SonarQubeClient({
-      url: "https://sonar.example.com",
-      auth: { token: "test-token" },
-    });
-    api = new ProjectsAPI(client);
+    api = new ProjectsAPI(createTestClient());
   });
 
   afterEach(() => {

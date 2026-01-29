@@ -7,11 +7,17 @@ import {
   SonarQubeClient,
   createClientWithToken,
   createClientWithCredentials,
+  type ClientOptions,
 } from "./client.ts";
 // Error factory functions are no longer needed in imports since we use toMatchObject
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
+
+// Test helper: create client with retries disabled for fast tests
+const TEST_OPTIONS: ClientOptions = { maxRetries: 0, retryDelay: 0, timeout: 1000 };
+const createTestClient = (url: string, token: string) => 
+  createClientWithToken(url, token, undefined, TEST_OPTIONS);
 
 describe("SonarQubeClient", () => {
   let mockFetch: ReturnType<typeof mock>;
@@ -43,7 +49,7 @@ describe("SonarQubeClient", () => {
     });
 
     test("accepts token authentication", () => {
-      const client = createClientWithToken("https://sonar.example.com", "test-token");
+      const client = createTestClient("https://sonar.example.com", "test-token");
       expect(client).toBeInstanceOf(SonarQubeClient);
     });
 
@@ -59,7 +65,7 @@ describe("SonarQubeClient", () => {
 
   describe("getServerStatus", () => {
     test("returns server status", async () => {
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
 
       const status = await client.getServerStatus();
 
@@ -68,7 +74,7 @@ describe("SonarQubeClient", () => {
     });
 
     test("includes authorization header with token", async () => {
-      const client = createClientWithToken("https://sonar.example.com", "my-token");
+      const client = createTestClient("https://sonar.example.com", "my-token");
 
       await client.getServerStatus();
 
@@ -87,7 +93,7 @@ describe("SonarQubeClient", () => {
         )
       );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       const result = await client.validateAuth();
 
       expect(result.valid).toBe(true);
@@ -102,7 +108,7 @@ describe("SonarQubeClient", () => {
         )
       );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       const version = await client.getVersion();
 
       expect(version).toBe("10.2.1");
@@ -123,7 +129,7 @@ describe("SonarQubeClient", () => {
           )
         );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       const result = await client.healthCheck();
 
       expect(result.healthy).toBe(true);
@@ -145,7 +151,7 @@ describe("SonarQubeClient", () => {
           )
         );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       const result = await client.healthCheck();
 
       expect(result.healthy).toBe(false);
@@ -165,7 +171,7 @@ describe("SonarQubeClient", () => {
           )
         );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       const result = await client.healthCheck();
 
       expect(result.healthy).toBe(false);
@@ -177,7 +183,7 @@ describe("SonarQubeClient", () => {
         Promise.reject(new TypeError("fetch failed"))
       );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       const result = await client.healthCheck();
 
       expect(result.healthy).toBe(false);
@@ -191,7 +197,7 @@ describe("SonarQubeClient", () => {
         Promise.resolve(new Response("", { status: 401 }))
       );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
 
       await expect(client.getServerStatus()).rejects.toMatchObject({
         name: "AuthenticationError",
@@ -204,7 +210,7 @@ describe("SonarQubeClient", () => {
         Promise.resolve(new Response("", { status: 403 }))
       );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
 
       await expect(client.getServerStatus()).rejects.toMatchObject({
         name: "AuthenticationError",
@@ -222,7 +228,7 @@ describe("SonarQubeClient", () => {
         )
       );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
 
       await expect(client.getServerStatus()).rejects.toMatchObject({
         name: "RateLimitError",
@@ -235,7 +241,7 @@ describe("SonarQubeClient", () => {
         Promise.reject(new TypeError("fetch failed"))
       );
 
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
 
       await expect(client.getServerStatus()).rejects.toMatchObject({
         name: "ConnectionError",
@@ -246,14 +252,14 @@ describe("SonarQubeClient", () => {
 
   describe("HTTP methods", () => {
     test("get() makes GET request", async () => {
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       await client.get("/api/test");
 
       expect(mockFetch.mock.calls[0][1].method).toBe("GET");
     });
 
     test("post() makes POST request with body", async () => {
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       await client.post("/api/test", { key: "value" });
 
       const call = mockFetch.mock.calls[0];
@@ -262,14 +268,14 @@ describe("SonarQubeClient", () => {
     });
 
     test("delete() makes DELETE request", async () => {
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       await client.delete("/api/test");
 
       expect(mockFetch.mock.calls[0][1].method).toBe("DELETE");
     });
 
     test("includes query parameters in URL", async () => {
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       await client.get("/api/test", { foo: "bar", num: 123 });
 
       const url = mockFetch.mock.calls[0][0];
@@ -277,7 +283,7 @@ describe("SonarQubeClient", () => {
     });
 
     test("skips undefined parameters", async () => {
-      const client = createClientWithToken("https://sonar.example.com", "token");
+      const client = createTestClient("https://sonar.example.com", "token");
       await client.get("/api/test", { foo: "bar", skip: undefined });
 
       const url = mockFetch.mock.calls[0][0];

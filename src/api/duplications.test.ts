@@ -4,14 +4,13 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { DuplicationsAPI, type FormattedDuplication } from "./duplications.ts";
-import { SonarQubeClient } from "./client.ts";
+import { createTestClient } from "./test-utils.ts";
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
 
 describe("DuplicationsAPI", () => {
   let mockFetch: ReturnType<typeof mock>;
-  let client: SonarQubeClient;
   let api: DuplicationsAPI;
 
   beforeEach(() => {
@@ -24,11 +23,7 @@ describe("DuplicationsAPI", () => {
       )
     );
     globalThis.fetch = mockFetch as unknown as typeof fetch;
-    client = new SonarQubeClient({
-      url: "https://sonar.example.com",
-      auth: { token: "test-token" },
-    });
-    api = new DuplicationsAPI(client);
+    api = new DuplicationsAPI(createTestClient());
   });
 
   afterEach(() => {

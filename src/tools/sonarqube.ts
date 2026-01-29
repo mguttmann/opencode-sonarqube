@@ -100,120 +100,136 @@ export const SonarQubeToolArgsSchema = z.object({
 
 export type SonarQubeToolArgs = z.infer<typeof SonarQubeToolArgsSchema>;
 
-/**
- * Execute the SonarQube tool
- * 
- * This function routes the action to the appropriate handler module.
- */
-export async function executeSonarQubeTool(
-  args: SonarQubeToolArgs,
-  context: {
-    directory?: string;
-    config?: Record<string, unknown>;
-  }
-): Promise<string> {
-  const directory = context.directory ?? process.cwd();
+/** Handler context type */
+import type { HandlerContext } from "./handlers/index.ts";
+import type { SonarQubeConfig } from "../types/index.ts";
 
-  // Load configuration - unwrap if nested under "sonarqube" key (OpenCode wraps plugin config)
-  const rawConfig = (context.config?.["sonarqube"] as Record<string, unknown> | undefined) ?? context.config;
-  const config = loadConfig(rawConfig);
-  if (!config) {
-    return formatError(ErrorMessages.configurationMissing(
-      "SonarQube configuration not found.",
-      [
-        "Set environment variables: SONAR_HOST_URL, SONAR_USER, and SONAR_PASSWORD",
-        "Or create a .sonarqube/config.json file in your project",
-        "Or add plugin configuration in opencode.json",
-      ]
-    ) + `
+/**
+ * Format error for missing configuration
+ */
+function getMissingConfigError(): string {
+  return formatError(ErrorMessages.configurationMissing(
+    "SonarQube configuration not found.",
+    [
+      "Set environment variables: SONAR_HOST_URL, SONAR_USER, and SONAR_PASSWORD",
+      "Or create a .sonarqube/config.json file in your project",
+      "Or add plugin configuration in opencode.json",
+    ]
+  ) + `
 
 Required environment variables:
 - SONAR_HOST_URL (e.g., https://sonarqube.company.com)
 - SONAR_USER (e.g., admin)
 - SONAR_PASSWORD (password or token)`);
+}
+
+/**
+ * Run bootstrap if needed
+ */
+async function ensureBootstrapped(config: SonarQubeConfig, directory: string): Promise<string | null> {
+  if (!(await needsBootstrap(directory))) {
+    return null;
+  }
+  
+  logger.info("First run detected, running bootstrap");
+  const { bootstrap } = await import("../bootstrap/index.ts");
+  const result = await bootstrap({ config, directory });
+  
+  if (!result.success) {
+    return formatError(`Setup Failed\n\n${result.message}`);
+  }
+  
+  logger.info("Bootstrap completed", { projectKey: result.projectKey });
+  return null;
+}
+
+/**
+ * Route action to appropriate handler
+ */
+async function routeAction(ctx: HandlerContext, args: SonarQubeToolArgs): Promise<string> {
+  const handlers: Record<string, () => Promise<string>> = {
+    analyze: () => handleAnalyze(ctx, args),
+    issues: () => handleIssues(ctx, args),
+    newissues: () => handleNewIssues(ctx, args),
+    status: () => handleStatus(ctx),
+    validate: () => handleValidate(ctx),
+    hotspots: () => handleHotspots(ctx),
+    reviewhotspot: () => handleReviewHotspot(ctx, args.hotspotKey, args.resolution, args.comment),
+    duplications: () => handleDuplications(ctx),
+    rule: () => handleRule(ctx, args.ruleKey),
+    history: () => handleHistory(ctx, args.branch),
+    profile: () => handleProfile(ctx),
+    branches: () => handleBranches(ctx),
+    metrics: () => handleMetrics(ctx, args.branch),
+    worstfiles: () => handleWorstFiles(ctx),
+  };
+  
+  const handler = handlers[args.action];
+  return handler ? handler() : formatError(`Unknown action: ${args.action}`);
+}
+
+/**
+ * Handle execution errors with appropriate messages
+ */
+function handleExecutionError(error: unknown, action: string, serverUrl: string): string {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  logger.error(`Tool execution failed: ${errorMessage}`);
+  
+  if (!(error instanceof Error) || !("code" in error)) {
+    return formatError(ErrorMessages.apiError(action, errorMessage, serverUrl));
+  }
+  
+  const errorCode = (error as { code: string }).code;
+  
+  if (errorCode === "CONNECTION_ERROR" || errorMessage.includes("Cannot connect")) {
+    return formatError(ErrorMessages.connectionError(serverUrl));
+  }
+  
+  if (errorMessage.includes("timed out")) {
+    return formatError(ErrorMessages.timeoutError(action, 30000));
+  }
+  
+  if (errorCode === "AUTH_ERROR") {
+    return formatError(ErrorMessages.authenticationError(errorMessage));
+  }
+  
+  return formatError(ErrorMessages.apiError(action, errorMessage, serverUrl));
+}
+
+/**
+ * Execute the SonarQube tool
+ */
+export async function executeSonarQubeTool(
+  args: SonarQubeToolArgs,
+  context: { directory?: string; config?: Record<string, unknown> }
+): Promise<string> {
+  const directory = context.directory ?? process.cwd();
+  const rawConfig = (context.config?.["sonarqube"] as Record<string, unknown> | undefined) ?? context.config;
+  const config = loadConfig(rawConfig);
+  
+  if (!config) {
+    return getMissingConfigError();
   }
 
   logger.info(`Executing SonarQube tool: ${args.action}`, { directory });
 
   try {
-    // Handle init/setup action
     if (args.action === "init" || args.action === "setup") {
       return await handleSetup(config, directory, args.force);
     }
 
-    // For all other actions, check if bootstrap is needed
-    if (await needsBootstrap(directory)) {
-      logger.info("First run detected, running bootstrap");
-      const { bootstrap } = await import("../bootstrap/index.ts");
-      const setupResult = await bootstrap({ config, directory });
-      if (!setupResult.success) {
-        return formatError(`Setup Failed\n\n${setupResult.message}`);
-      }
-      logger.info("Bootstrap completed", { projectKey: setupResult.projectKey });
-    }
+    const bootstrapError = await ensureBootstrapped(config, directory);
+    if (bootstrapError) return bootstrapError;
 
-    // Get project state
     const state = await getProjectState(directory);
     if (!state) {
       return formatError(`Project not initialized. Run with action: "setup" first.`);
     }
 
-    const projectKey = args.projectKey ?? state.projectKey;
-
-    // Create handler context once for all handlers
-    const ctx = createHandlerContext(config, state, projectKey, directory);
-
-    // Route to appropriate handler
-    switch (args.action) {
-      case "analyze":
-        return await handleAnalyze(ctx, args);
-
-      case "issues":
-        return await handleIssues(ctx, args);
-
-      case "newissues":
-        return await handleNewIssues(ctx, args);
-
-      case "status":
-        return await handleStatus(ctx);
-
-      case "validate":
-        return await handleValidate(ctx);
-
-      case "hotspots":
-        return await handleHotspots(ctx);
-
-      case "reviewhotspot":
-        return await handleReviewHotspot(ctx, args.hotspotKey, args.resolution, args.comment);
-
-      case "duplications":
-        return await handleDuplications(ctx);
-
-      case "rule":
-        return await handleRule(ctx, args.ruleKey);
-
-      case "history":
-        return await handleHistory(ctx, args.branch);
-
-      case "profile":
-        return await handleProfile(ctx);
-
-      case "branches":
-        return await handleBranches(ctx);
-
-      case "metrics":
-        return await handleMetrics(ctx, args.branch);
-
-      case "worstfiles":
-        return await handleWorstFiles(ctx);
-
-      default:
-        return formatError(`Unknown action: ${args.action}`);
-    }
+    const ctx = createHandlerContext(config, state, args.projectKey ?? state.projectKey, directory);
+    return await routeAction(ctx, args);
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error(`Tool execution failed: ${errorMessage}`);
-    return formatError(ErrorMessages.apiError(args.action, errorMessage, config.url));
+    return handleExecutionError(error, args.action, config.url);
   }
 }
 

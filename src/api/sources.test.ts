@@ -4,14 +4,13 @@
 
 import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test";
 import { SourcesAPI, type IssueWithContext } from "./sources.ts";
-import { SonarQubeClient } from "./client.ts";
+import { createTestClient } from "./test-utils.ts";
 
 // Mock fetch globally
 const originalFetch = globalThis.fetch;
 
 describe("SourcesAPI", () => {
   let mockFetch: ReturnType<typeof mock>;
-  let client: SonarQubeClient;
   let api: SourcesAPI;
 
   beforeEach(() => {
@@ -24,11 +23,7 @@ describe("SourcesAPI", () => {
       )
     );
     globalThis.fetch = mockFetch as unknown as typeof fetch;
-    client = new SonarQubeClient({
-      url: "https://sonar.example.com",
-      auth: { token: "test-token" },
-    });
-    api = new SourcesAPI(client);
+    api = new SourcesAPI(createTestClient());
   });
 
   afterEach(() => {
