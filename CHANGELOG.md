@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- CI: the SonarQube quality gate job runs only when the repository variable
+  `SONARQUBE_GATE` is `true`, and checks server reachability and token validity
+  before scanning; GitHub Actions updated to Node 24 versions
+
 ### Planned
 - Pull request decoration support
 - Webhook integration for real-time updates
